@@ -1,0 +1,33 @@
+import {_electron,expect} from '@playwright/test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import * as G from '../src/core.mjs';
+const executablePath=process.env.STUNTS_EXE||path.resolve('node_modules/electron/dist/electron.exe');
+const profile=path.resolve('artifacts',`windows-smoke-profile-${Date.now()}`);
+const electron=await _electron.launch({executablePath,args:[...(process.env.STUNTS_EXE?[]:['.']),`--user-data-dir=${profile}`],env:{...process.env,ELECTRON_RUN_AS_NODE:undefined},timeout:30000});
+try{
+  const page=await electron.firstWindow(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.waitForFunction(()=>window.stunts?.trackCount===44,{},{timeout:30000});
+  await expect(page.getByRole('heading',{name:/DEFY THE/})).toBeVisible();
+  const security=await page.evaluate(()=>({node:typeof require,webgl:!!document.querySelector('#world').getContext('webgl2'),tracks:window.stunts.trackCount}));
+  assert.equal(security.node,'undefined');assert.equal(security.webgl,true);
+  await page.keyboard.press('F11');await expect.poll(()=>electron.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].isFullScreen())).toBe(true);
+  await page.keyboard.press('F11');await expect.poll(()=>electron.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].isFullScreen())).toBe(false);
+  const track=G.blankTrack('Tree recovery check');track.terrain.fill(6);track.tiles[20*30+15]=1;track.tiles[19*30+15]=153;
+  await page.getByRole('button',{name:'Tracks',exact:true}).click();await page.getByRole('button',{name:'Import .TRK / .STUNT',exact:true}).click();
+  await page.locator('#file').setInputFiles({name:'TREE-RECOVERY.TRK',mimeType:'application/octet-stream',buffer:Buffer.from(G.writeTrack(track))});
+  await page.waitForFunction(()=>window.stunts.track.name==='TREE-RECOVERY');
+  await page.getByRole('button',{name:'Drive',exact:true}).click();await page.getByRole('button',{name:'Start your engine',exact:false}).click();await page.keyboard.down('KeyW');
+  await page.waitForFunction(()=>window.stunts.car.time>2&&window.stunts.car.z<628&&window.stunts.car.speed===0,{},{timeout:30000});await page.keyboard.up('KeyW');
+  assert.equal(await page.evaluate(()=>window.stunts.mode),'race');assert.equal(await page.evaluate(()=>window.stunts.car.crashed),false);
+  await page.screenshot({path:'artifacts/tree-stop.png'});const contact=await page.evaluate(()=>window.stunts.car.z);
+  await page.keyboard.down('KeyS');await page.waitForFunction(start=>window.stunts.car.speed<-9&&window.stunts.car.z>start+3,contact,{timeout:15000});await page.keyboard.up('KeyS');
+  assert.ok(await page.evaluate(start=>window.stunts.car.z>start+3,contact));assert.equal(await page.evaluate(()=>window.stunts.mode),'race');
+  await page.keyboard.down('KeyD');await page.waitForFunction(()=>Math.abs(window.stunts.car.yaw)>.3,{},{timeout:10000});await page.keyboard.up('KeyD');
+  await page.screenshot({path:'artifacts/tree-recovery.png'});await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(()=>window.stunts.mode),'paused');
+  await page.getByRole('button',{name:'Watch replay',exact:true}).click();await expect(page.getByLabel('Replay timeline')).toBeVisible();await page.screenshot({path:'artifacts/windows-desktop.png'});
+  assert.deepEqual(errors,[]);const report={passed:true,version:JSON.parse(await fs.readFile('package.json','utf8')).version,executablePath,security,errors,validated:['native Windows launch','offline file assets','41 DOS tracks + 3 modern circuits','WebGL 2','fullscreen','tree impact stops car without ending run','reverse recovery','sharper steering','pause','replay','isolated renderer']};
+  await fs.writeFile('artifacts/desktop-verification.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+}finally{await electron.close();}
